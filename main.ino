@@ -7,24 +7,26 @@
 #include <ESP8266WebServer.h>
 #include "secrets.h"
 
-#define TFT_CS         D1
-#define TFT_RST        D8                                    
-#define TFT_DC         D2
-#define TFT_MOSI       D5
-#define TFT_SCLK       D0
+// Operating Constants
+#define SENSOR_INTERVAL 30000
+#define TEMP_THRESHOLD 0.2
+#define HUM_THRESHOLD 1.0
+
+// TFT Pins and Initialization
+#define TFT_CS D1
+#define TFT_RST D8
+#define TFT_DC D2
+#define TFT_MOSI D5
+#define TFT_SCLK D0
 
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST);
 
+// DHT Pin and Initialization
 #define pinDATA D6
 
 DHT22 dht22(pinDATA);
 
-const char* ssid = WIFI_SSID;
-const char* password = WIFI_PASSWORD;
-
-IPAddress local_IP(192, 168, 1, 100);
-IPAddress gateway(192, 168, 1, 1);
-IPAddress subnet(255, 255, 255, 0);
+// Web Server and Routes
 
 ESP8266WebServer server(80);
 
@@ -43,28 +45,52 @@ void handleMetrics() {
   String clean = server.arg("clean");
   if (clean == "true") {
     // Send human-readable metrics
-    metrics = String("Temperature: ") + String(t) + " ºC\n" + 
+    metrics = String("Temperature: ") + String(t) + " ºC\n" +
               String("Humidity: ") + String(h) + " %\n";
   } else {
     // Send Prometheus-formatted metrics
-    metrics = String("# HELP esp_temperature_c Temperature in Celsius\n") +
-              String("# TYPE esp_temperature_c gauge\n") +
-              String("esp_temperature_c{location=\"office\"} ") + String(t) + "\n" +
-              String("# HELP esp_humidity_percent Humidity %\n") +
-              String("# TYPE esp_humidity_percent gauge\n") +
-              String("esp_humidity_percent{location=\"office\"} ") + String(h) + "\n";
+    metrics = String("# HELP esp_temperature_c Temperature in Celsius\n")+ 
+              String("# TYPE esp_temperature_c gauge\n") + 
+              String("esp_temperature_c{location=\"office\"} ") + 
+              String(t) + "\n" + String("# HELP esp_humidity_percent Humidity %\n") + 
+              String("# TYPE esp_humidity_percent gauge\n") + 
+              String("esp_humidity_percent{location=\"office\"} ") + 
+              String(h) + "\n";
   }
 
-  // Return the metrics in Prometheus format
   server.send(200, "text/plain; charset=utf-8", metrics);
 }
 
-void handleVersion() {
-  server.send(200, "text/plain", "ESP8266 Sensor v1.0.0");
+void handleForceRefresh() {
+  float t = dht22.getTemperature();
+  float h = dht22.getHumidity();
+
+  if (isnan(t) || isnan(h)) return;
+
+  // Clear the display
+  tft.fillScreen(ST77XX_BLACK);
+
+  Serial.printf("t=%.2f", t);
+  Serial.print("\t");
+  Serial.printf("h=%.2f", h);
+  Serial.println();
+
+  print_measurements(t, h, ST77XX_WHITE);
+
+  server.send(200, "text/plain", "Refreshed metrics on the screen.");
 }
 
-void setup(void) {
-  Serial.begin(9600);
+void handleVersion() {
+  server.send(200, "text/plain", "ESP8266 Sensor v1.1");
+}
+
+void setupWifi() {
+  IPAddress local_IP(192, 168, 1, 100);
+  IPAddress gateway(192, 168, 1, 1);
+  IPAddress subnet(255, 255, 255, 0);
+
+  const char* ssid = WIFI_SSID;
+  const char* password = WIFI_PASSWORD;
 
   // Setup Wifi
   WiFi.config(local_IP, gateway, subnet);
@@ -72,6 +98,12 @@ void setup(void) {
   while (WiFi.status() != WL_CONNECTED) delay(500);
 
   Serial.println("Wifi is on.");
+}
+
+void setup(void) {
+  Serial.begin(9600);
+
+  setupWifi();
 
   tft.initR(INITR_BLACKTAB);
   tft.fillScreen(ST77XX_BLACK);
@@ -80,6 +112,7 @@ void setup(void) {
 
   server.on("/version", handleVersion);
   server.on("/metrics", handleMetrics);
+  server.on("/forceRefresh", handleForceRefresh);
   server.begin();
 
   Serial.println("Web server is on.");
@@ -91,7 +124,7 @@ void print_measurements(float t, float h, int color) {
   tft.setTextWrap(true);
   tft.print(t, 2);
   int save_cursor_y = tft.getCursorY();
-  tft.setCursor(tft.getCursorX()+10, tft.getCursorY()-4);
+  tft.setCursor(tft.getCursorX() + 10, tft.getCursorY() - 4);
   tft.setTextSize(2);
   tft.print("o");
   tft.setCursor(tft.getCursorX(), save_cursor_y);
@@ -103,16 +136,10 @@ void print_measurements(float t, float h, int color) {
 }
 
 unsigned long lastSensorRead = 0;
-const unsigned long SENSOR_INTERVAL = 30000;
-const float TEMP_THRESHOLD = 0.2;
-const float HUM_THRESHOLD = 1.0;
 
-float last_t = 0.0;
-float last_h = 0.0;
+float last_t = 0.0, last_h = 0.0;
 
-void loop() {
-  server.handleClient();
-
+void sense() {
   unsigned long now = millis();
 
   // If not enough time passed for a new reading return
@@ -125,6 +152,7 @@ void loop() {
   float t = dht22.getTemperature();
   float h = dht22.getHumidity();
 
+  // If values are invalid
   if (isnan(t) || isnan(h)) return;
 
   // Check for threshold
@@ -132,15 +160,21 @@ void loop() {
     return;
   }
 
-  // This one clears the display
+  // This one clears the display more efficiently
   print_measurements(last_t, last_h, ST77XX_BLACK);
 
   last_t = t;
   last_h = h;
 
-  Serial.print("h=");Serial.print(h,2);Serial.print("\t");
-  Serial.print("t=");Serial.println(t,2);
+  Serial.printf("t=%.2f", t);
+  Serial.print("\t");
+  Serial.printf("h=%.2f", h);
+  Serial.println();
 
   print_measurements(t, h, ST77XX_WHITE);
+}
 
+void loop() {
+  server.handleClient();
+  sense();
 }
